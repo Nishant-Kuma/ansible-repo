@@ -1,0 +1,106 @@
+---
+- name: Configure Laravel application with Podman
+  hosts: localhost
+  gather_facts: false
+  become: true
+
+  vars:
+    laravel_app_name: mylaravelapp
+    laravel_app_root: /var/www/html/mylaravelapp
+    laravel_db_name: pgdb
+    laravel_db_user: pguser
+    laravel_db_password: pgpwd
+    postgres_version: 13
+
+  tasks:
+    - name: Install Podman
+      package:
+        name: podman
+        state: present
+
+    - name: Create Laravel application directory
+      file:
+        path: "{{ laravel_app_root }}"
+        state: directory
+        mode: '0755'
+
+    - name: Set up Apache2 container
+      containers.podman.podman_container:
+        name: laravel_apache
+        image: docker.io/library/httpd:2.4
+        state: started
+        ports:
+          - 80:80
+          - 445:443
+        volumes:
+          - "{{ laravel_app_root }}:/var/www/html"
+        restart_policy: always
+        interactive: false
+
+    - name: Install PHP and required extensions
+      containers.podman.podman_container:
+        name: laravel_php
+        image: docker.io/library/php:7.4-apache
+        state: started
+        volumes:
+          - "{{ laravel_app_root }}:/var/www/html"
+        restart_policy: always
+        interactive: false
+
+    - name: Install PostgreSQL
+      containers.podman.podman_container:
+        name: laravel_postgres
+        image: docker.io/library/postgres:{{ postgres_version }}
+        state: started
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_DB: "{{ laravel_db_name }}"
+          POSTGRES_USER: "{{ laravel_db_user }}"
+          POSTGRES_PASSWORD: "{{ laravel_db_password }}"
+        restart_policy: always
+        interactive: false
+
+    - name: Wait for master container to start
+      wait_for:
+        host: localhost
+        port: 5432
+        delay: 5
+        timeout: 60
+
+    - name: Start slave container
+      containers.podman.podman_container:
+        name: laravel_postgres_slave
+        image: docker.io/library/postgres:13
+        state: started
+        ports:
+          - 5433:5432
+        env:
+          POSTGRES_DB: pgdb
+          POSTGRES_USER: pguser
+          POSTGRES_PASSWORD: pgpwd
+          POSTGRES_MASTER_HOST: localhost
+          POSTGRES_MASTER_PORT: 5432
+          POSTGRES_REPLICATION_ROLE: replica
+        restart_policy: always
+        interactive: false    
+
+    - name: Update Apache2 configuration
+      containers.podman.podman_container:
+        name: laravel_apache
+        command: service apache2 restart
+        interactive: false
+
+    - name: Install Laravel dependencies
+      containers.podman.podman_container:
+        name: laravel_php
+        command: composer install
+        workdir: "{{ laravel_app_root }}"
+        interactive: false
+
+    - name: Set permissions on storage directory
+      containers.podman.podman_container:
+        name: laravel_php
+        command: chown -R www-data:www-data storage
+        workdir: "{{ laravel_app_root }}"
+        interactive: false
